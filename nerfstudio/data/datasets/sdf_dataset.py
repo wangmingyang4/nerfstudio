@@ -1,4 +1,4 @@
-# Copyright 2022 The Nerfstudio Team. All rights reserved.
+# Copyright 2022 the Regents of the University of California, Nerfstudio Team and contributors. All rights reserved.
 #
 # Licensed under the Apache License, Version 2.0 (the "License");
 # you may not use this file except in compliance with the License.
@@ -21,6 +21,7 @@ from typing import Dict
 
 import numpy as np
 import torch
+from torch import Tensor
 
 from nerfstudio.data.dataparsers.base_dataparser import DataparserOutputs
 from nerfstudio.data.datasets.base_dataset import InputDataset
@@ -34,6 +35,8 @@ class SDFDataset(InputDataset):
         scale_factor: The scaling factor for the dataparser outputs.
     """
 
+    exclude_batch_keys_from_device = InputDataset.exclude_batch_keys_from_device + ["depth", "normal"]
+
     def __init__(self, dataparser_outputs: DataparserOutputs, scale_factor: float = 1.0):
         super().__init__(dataparser_outputs, scale_factor)
 
@@ -42,7 +45,7 @@ class SDFDataset(InputDataset):
         self.normal_filenames = self.metadata["normal_filenames"]
         self.camera_to_worlds = self.metadata["camera_to_worlds"]
         # can be none if auto orient not enabled in dataparser
-        self.transform = self.metadata["normal_filenames"]
+        self.transform = self.metadata["transform"]
         self.include_mono_prior = self.metadata["include_mono_prior"]
 
     def get_metadata(self, data: Dict) -> Dict:
@@ -57,12 +60,12 @@ class SDFDataset(InputDataset):
             depth_image, normal_image = self.get_depths_and_normals(
                 depth_filepath=depth_filepath, normal_filename=normal_filepath, camtoworld=camtoworld
             )
-            metadata["depth_image"] = depth_image
-            metadata["normal_image"] = normal_image
+            metadata["depth"] = depth_image
+            metadata["normal"] = normal_image
 
         return metadata
 
-    def get_depths_and_normals(self, depth_filepath: Path, normal_filename: Path, camtoworld: np.ndarray):
+    def get_depths_and_normals(self, depth_filepath: Path, normal_filename: Path, camtoworld: Tensor):
         """function to process additional depths and normal information
         Args:
             depth_filepath: path to depth file

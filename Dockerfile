@@ -1,143 +1,133 @@
-# Define base image.
-FROM nvidia/cuda:11.8.0-devel-ubuntu22.04
+# syntax=docker/dockerfile:1
+ARG UBUNTU_VERSION=22.04
+ARG NVIDIA_CUDA_VERSION=11.8.0
+# CUDA architectures, required by Colmap and tiny-cuda-nn. Use >= 8.0 for faster TCNN.
+ARG CUDA_ARCHITECTURES="90;89;86;80;75;70;61"
+ARG NERFSTUDIO_VERSION=""
 
-# Variables used at build time.
-## CUDA architectures, required by Colmap and tiny-cuda-nn.
-## NOTE: All commonly used GPU architectures are included and supported here. To speedup the image build process remove all architectures but the one of your explicit GPU. Find details here: https://developer.nvidia.com/cuda-gpus (8.6 translates to 86 in the line below) or in the docs.
-ARG CUDA_ARCHITECTURES=90;89;86;80;75;70;61;52;37
+# Pull source either provided or from git.
+FROM scratch as source_copy
+ONBUILD COPY . /tmp/nerfstudio
+FROM alpine/git as source_no_copy
+ARG NERFSTUDIO_VERSION
+ONBUILD RUN git clone --branch ${NERFSTUDIO_VERSION} --recursive https://github.com/nerfstudio-project/nerfstudio.git /tmp/nerfstudio
+ARG NERFSTUDIO_VERSION
+FROM source_${NERFSTUDIO_VERSION:+no_}copy as source
 
-# Set environment variables.
-## Set non-interactive to prevent asking for user inputs blocking image creation.
+FROM nvidia/cuda:${NVIDIA_CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION} as builder
+ARG CUDA_ARCHITECTURES
+ARG NVIDIA_CUDA_VERSION
+ARG UBUNTU_VERSION
+
 ENV DEBIAN_FRONTEND=noninteractive
-## Set timezone as it is required by some packages.
-ENV TZ=Europe/Berlin
-## CUDA Home, required to find CUDA in some packages.
-ENV CUDA_HOME="/usr/local/cuda"
-
-# Install required apt packages and clear cache afterwards.
+ENV QT_XCB_GL_INTEGRATION=xcb_egl
 RUN apt-get update && \
-    apt-get install -y --no-install-recommends \
-    build-essential \
-    cmake \
-    curl \
-    ffmpeg \
-    git \
-    libatlas-base-dev \
-    libboost-filesystem-dev \
-    libboost-graph-dev \
-    libboost-program-options-dev \
-    libboost-system-dev \
-    libboost-test-dev \
-    libcgal-dev \
-    libeigen3-dev \
-    libflann-dev \
-    libfreeimage-dev \
-    libgflags-dev \
-    libglew-dev \
-    libgoogle-glog-dev \
-    libmetis-dev \
-    libprotobuf-dev \
-    libqt5opengl5-dev \
-    libsqlite3-dev \
-    libsuitesparse-dev \
-    nano \
-    protobuf-compiler \
-    python3.10-dev \
-    python3-pip \
-    qtbase5-dev \
-    sudo \
-    wget && \
-    rm -rf /var/lib/apt/lists/*
+    apt-get install -y --no-install-recommends --no-install-suggests \
+        git \
+        cmake \
+        ninja-build \
+        build-essential \
+        libboost-program-options-dev \
+        libboost-filesystem-dev \
+        libboost-graph-dev \
+        libboost-system-dev \
+        libeigen3-dev \
+        libflann-dev \
+        libfreeimage-dev \
+        libmetis-dev \
+        libgoogle-glog-dev \
+        libgtest-dev \
+        libsqlite3-dev \
+        libglew-dev \
+        qtbase5-dev \
+        libqt5opengl5-dev \
+        libcgal-dev \
+        libceres-dev \
+        python3.10-dev \
+        python3-pip
 
-
-# Install GLOG (required by ceres).
-RUN git clone --branch v0.6.0 https://github.com/google/glog.git --single-branch && \
-    cd glog && \
-    mkdir build && \
-    cd build && \
-    cmake .. && \
-    make -j && \
-    make install && \
-    cd ../.. && \
-    rm -rf glog
-# Add glog path to LD_LIBRARY_PATH.
-ENV LD_LIBRARY_PATH="${LD_LIBRARY_PATH}:/usr/local/lib"
-
-# Install Ceres-solver (required by colmap).
-RUN git clone --branch 2.1.0 https://ceres-solver.googlesource.com/ceres-solver.git --single-branch && \
-    cd ceres-solver && \
-    git checkout $(git describe --tags) && \
-    mkdir build && \
-    cd build && \
-    cmake .. -DBUILD_TESTING=OFF -DBUILD_EXAMPLES=OFF && \
-    make -j && \
-    make install && \
-    cd ../.. && \
-    rm -rf ceres-solver
-
-# Install colmap.
-RUN git clone --branch 3.8 https://github.com/colmap/colmap.git --single-branch && \
+# Build and install COLMAP.
+RUN git clone https://github.com/colmap/colmap.git && \
     cd colmap && \
+    git checkout "3.9.1" && \
     mkdir build && \
     cd build && \
-    cmake .. -DCUDA_ENABLED=ON \
-             -DCUDA_NVCC_FLAGS="--std c++14" \
-             -DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES} && \
-    make -j && \
-    make install && \
-    cd ../.. && \
-    rm -rf colmap
-    
-# Create non root user and setup environment.
-RUN useradd -m -d /home/user -g root -G sudo -u 1000 user
-RUN usermod -aG sudo user
-# Set user password
-RUN echo "user:user" | chpasswd
-# Ensure sudo group users are not asked for a password when using sudo command by ammending sudoers file
-RUN echo '%sudo ALL=(ALL) NOPASSWD:ALL' >> /etc/sudoers
+    mkdir -p /build && \
+    cmake .. -GNinja "-DCMAKE_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}" \
+        -DCMAKE_INSTALL_PREFIX=/build/colmap && \
+    ninja install -j1 && \
+    cd ~
 
-# Switch to new uer and workdir.
-USER 1000
-WORKDIR /home/user
+# Upgrade pip and install dependencies.
+# pip install torch==2.2.2 torchvision==0.17.2 --index-url https://download.pytorch.org/whl/cu118 && \
+RUN pip install --no-cache-dir --upgrade pip 'setuptools<70.0.0' && \
+    pip install --no-cache-dir torch==2.1.2+cu118 torchvision==0.16.2+cu118 'numpy<2.0.0' --extra-index-url https://download.pytorch.org/whl/cu118 && \
+    git clone --branch master --recursive https://github.com/cvg/Hierarchical-Localization.git /opt/hloc && \
+    cd /opt/hloc && git checkout v1.4 && python3.10 -m pip install --no-cache-dir . && cd ~ && \
+    TCNN_CUDA_ARCHITECTURES="${CUDA_ARCHITECTURES}" pip install --no-cache-dir "git+https://github.com/NVlabs/tiny-cuda-nn.git@b3473c81396fe927293bdfd5a6be32df8769927c#subdirectory=bindings/torch" && \
+    pip install --no-cache-dir pycolmap==0.6.1 pyceres==2.1 omegaconf==2.3.0
 
-# Add local user binary folder to PATH variable.
-ENV PATH="${PATH}:/home/user/.local/bin"
-SHELL ["/bin/bash", "-c"]
+# Install gsplat and nerfstudio.
+# NOTE: both are installed jointly in order to prevent docker cache with latest
+# gsplat version (we do not expliticly specify the commit hash).
+#
+# We set MAX_JOBS to reduce resource usage for GH actions:
+# - https://github.com/nerfstudio-project/gsplat/blob/db444b904976d6e01e79b736dd89a1070b0ee1d0/setup.py#L13-L23
+COPY --from=source /tmp/nerfstudio/ /tmp/nerfstudio
+RUN export TORCH_CUDA_ARCH_LIST="$(echo "$CUDA_ARCHITECTURES" | tr ';' '\n' | awk '$0 > 70 {print substr($0,1,1)"."substr($0,2)}' | tr '\n' ' ' | sed 's/ $//')" && \
+    export MAX_JOBS=4 && \
+    GSPLAT_VERSION="$(sed -n 's/.*gsplat==\s*\([^," '"'"']*\).*/\1/p' /tmp/nerfstudio/pyproject.toml)" && \
+    pip install --no-cache-dir git+https://github.com/nerfstudio-project/gsplat.git@v${GSPLAT_VERSION} && \
+    pip install --no-cache-dir /tmp/nerfstudio 'numpy<2.0.0' && \
+    rm -rf /tmp/nerfstudio
 
-# Upgrade pip and install packages.
-RUN python3.10 -m pip install --upgrade pip setuptools pathtools promise pybind11
-# Install pytorch and submodules (Currently, we still use cu116 which is the latest version for toch 1.12.1 and is compatible with CUDA 11.8).
-RUN python3.10 -m pip install torch==1.13.1+cu116 torchvision==0.14.1+cu116 --extra-index-url https://download.pytorch.org/whl/cu116
-# Install tynyCUDNN (we need to set the target architectures as environment variable first).
-ENV TCNN_CUDA_ARCHITECTURES=${CUDA_ARCHITECTURES}
-RUN python3.10 -m pip install git+https://github.com/NVlabs/tiny-cuda-nn.git#subdirectory=bindings/torch
+# Fix permissions
+RUN chmod -R go=u /usr/local/lib/python3.10 && \
+    chmod -R go=u /build
 
-# Install pycolmap 0.3.0, required by hloc.
-RUN git clone --branch v0.3.0 --recursive https://github.com/colmap/pycolmap.git && \
-    cd pycolmap && \
-    python3.10 -m pip install . && \
-    cd ..
+#
+# Docker runtime stage.
+#
+FROM nvidia/cuda:${NVIDIA_CUDA_VERSION}-runtime-ubuntu${UBUNTU_VERSION} as runtime
+ARG CUDA_ARCHITECTURES
+ARG NVIDIA_CUDA_VERSION
+ARG UBUNTU_VERSION
 
-# Install hloc master (last release (1.3) is too old) as alternative feature detector and matcher option for nerfstudio.
-RUN git clone --branch master --recursive https://github.com/cvg/Hierarchical-Localization && \
-    cd Hierarchical-Localization && \
-    python3.10 -m pip install -e . && \
-    cd ..
+LABEL org.opencontainers.image.source = "https://github.com/nerfstudio-project/nerfstudio"
+LABEL org.opencontainers.image.licenses = "Apache License 2.0"
+LABEL org.opencontainers.image.base.name="docker.io/library/nvidia/cuda:${NVIDIA_CUDA_VERSION}-devel-ubuntu${UBUNTU_VERSION}"
+LABEL org.opencontainers.image.documentation = "https://docs.nerf.studio/"
 
-# Copy nerfstudio folder and give ownership to user.
-ADD . /home/user/nerfstudio
-USER root
-RUN chown -R user /home/user/nerfstudio
-USER 1000
+# Minimal dependencies to run COLMAP binary compiled in the builder stage.
+# Note: this reduces the size of the final image considerably, since all the
+# build dependencies are not needed.
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends --no-install-suggests \
+        libboost-filesystem1.74.0 \
+        libboost-program-options1.74.0 \
+        libc6 \
+        libceres2 \
+        libfreeimage3 \
+        libgcc-s1 \
+        libgl1 \
+        libglew2.2 \
+        libgoogle-glog0v5 \
+        libqt5core5a \
+        libqt5gui5 \
+        libqt5widgets5 \
+        python3.10 \
+        python3.10-dev \
+        build-essential \
+        python-is-python3 \
+        ffmpeg
 
-# Install nerfstudio dependencies.
-RUN cd nerfstudio && \
-    python3.10 -m pip install -e . && \
-    cd ..
+# Copy packages from builder stage.
+COPY --from=builder /build/colmap/ /usr/local/
+COPY --from=builder /usr/local/lib/python3.10/dist-packages/ /usr/local/lib/python3.10/dist-packages/
+COPY --from=builder /usr/local/bin/ns* /usr/local/bin/
 
-# Change working directory
-WORKDIR /workspace
+# Install nerfstudio cli auto completion
+RUN /bin/bash -c 'ns-install-cli --mode install'
 
-# Install nerfstudio cli auto completion and enter shell if no command was provided.
-CMD ns-install-cli --mode install && /bin/bash
-
+# Bash as default entrypoint.
+CMD /bin/bash -l
